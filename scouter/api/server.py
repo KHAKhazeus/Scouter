@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from scouter.api.game_manager import GameManager
+from scouter.api.rl_monitor import router as rl_monitor_router
 from scouter.env.scout_env import AGENTS, ScoutEnv
 
 app = FastAPI(title="Scout Game Server", version="0.1.0")
@@ -19,6 +24,9 @@ app.add_middleware(
 )
 
 manager = GameManager()
+app.include_router(rl_monitor_router)
+
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 # ---------------------------------------------------------------------------
 # HTTP endpoints
@@ -193,3 +201,17 @@ async def game_ws(websocket: WebSocket, game_id: str, seat: str = "spectator") -
             del session.players[assigned_seat]
         elif websocket in session.spectators:
             session.spectators.remove(websocket)
+
+
+if FRONTEND_DIST.exists():
+    assets_dir = FRONTEND_DIST / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="frontend-assets")
+
+    @app.get("/", include_in_schema=False)
+    async def frontend_index() -> FileResponse:
+        return FileResponse(FRONTEND_DIST / "index.html")
+
+    @app.get("/rl-dashboard", include_in_schema=False)
+    async def frontend_dashboard() -> FileResponse:
+        return FileResponse(FRONTEND_DIST / "index.html")

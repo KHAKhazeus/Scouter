@@ -13,6 +13,7 @@ dependencies = [
     "pytest>=9.0.2",
     "ray[rllib]>=2.54.0",
     "torch>=2.10.0",
+    "tensorboard>=2.20.0",
 ]
 
 [project.optional-dependencies]
@@ -33,3 +34,9 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "setuptools<81",
+    "tensorboard>=2.20.0",
+]

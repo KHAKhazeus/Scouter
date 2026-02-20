@@ -42,6 +42,19 @@ FLAT_OBS_KEYS: tuple[str, ...] = (
 )
 
 
+def flatten_obs_dict(raw: dict[str, Any]) -> dict[str, np.ndarray]:
+    """Flatten a ScoutEnv observation dict into RLModule input format."""
+    missing = [k for k in FLAT_OBS_KEYS if k not in raw]
+    if missing:
+        raise KeyError(f"Missing keys in observation for flattening: {missing}")
+
+    parts = [np.asarray(raw[k], dtype=np.float32).reshape(-1) for k in FLAT_OBS_KEYS]
+    return {
+        "observations": np.concatenate(parts, dtype=np.float32),
+        "action_mask": np.asarray(raw["action_mask"], dtype=np.float32),
+    }
+
+
 class FlatObsWrapper(BaseWrapper):
     """Restructure ScoutEnv observations for RLlib action masking."""
 
@@ -79,15 +92,7 @@ class FlatObsWrapper(BaseWrapper):
 
     def observe(self, agent: str) -> dict[str, np.ndarray]:
         raw = self.env.observe(agent)
-        missing = [k for k in FLAT_OBS_KEYS if k not in raw]
-        if missing:
-            raise KeyError(f"Missing keys in observation for flattening: {missing}")
-
-        parts = [np.asarray(raw[k], dtype=np.float32).reshape(-1) for k in FLAT_OBS_KEYS]
-        return {
-            "observations": np.concatenate(parts, dtype=np.float32),
-            "action_mask": np.asarray(raw["action_mask"], dtype=np.float32),
-        }
+        return flatten_obs_dict(raw)
 
 
 class ScoutActionMaskRLModule(DefaultPPOTorchRLModule):

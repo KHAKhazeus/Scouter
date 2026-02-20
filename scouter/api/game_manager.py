@@ -22,14 +22,19 @@ class GameSession:
     players: dict[str, WebSocket] = field(default_factory=dict)
     spectators: list[WebSocket] = field(default_factory=list)
     started: bool = False
+    agent_id: str | None = None
+    agent_seat: str | None = None
 
     def seat_taken(self, seat: str) -> bool:
-        return seat in self.players
+        return seat in self.players or seat == self.agent_seat
 
     def available_seats(self) -> list[str]:
-        return [s for s in AGENTS if s not in self.players]
+        return [s for s in AGENTS if not self.seat_taken(s)]
 
     def all_seats_filled(self) -> bool:
+        if self.agent_seat in AGENTS:
+            human_seat = AGENTS[1 - AGENTS.index(self.agent_seat)]
+            return human_seat in self.players
         return all(a in self.players for a in AGENTS)
 
     def player_for_ws(self, ws: WebSocket) -> str | None:
@@ -50,7 +55,14 @@ class GameSession:
         hands = dict(rich["hands"])
         if opp:
             hands[opp] = None  # hidden
-        return {**rich, "hands": hands, "my_seat": seat}
+        return {
+            **rich,
+            "hands": hands,
+            "my_seat": seat,
+            "agent_session": self.agent_id is not None,
+            "agent_seat": self.agent_seat,
+            "agent_id": self.agent_id,
+        }
 
     async def broadcast(self) -> None:
         """Send the current state to all connected clients."""
@@ -103,6 +115,9 @@ class GameManager:
                 "started": s.started,
                 "available_seats": s.available_seats(),
                 "spectator_count": len(s.spectators),
+                "agent_session": s.agent_id is not None,
+                "agent_id": s.agent_id,
+                "agent_seat": s.agent_seat,
             }
             for s in self._sessions.values()
         ]
