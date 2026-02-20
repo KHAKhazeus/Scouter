@@ -664,15 +664,15 @@ def test_score_diff_reward_is_zero_sum():
 
 
 # ---------------------------------------------------------------------------
-# ScoutFlatAEC wrapper for RLlib
+# FlatObsWrapper for RLlib
 # ---------------------------------------------------------------------------
 
 
 def test_flat_aec_obs_shape():
-    """ScoutFlatAEC should produce {"observations": flat, "action_mask": mask}."""
-    from scouter.rl.rllib_wrapper import ScoutFlatAEC
+    """FlatObsWrapper should produce {"observations": flat, "action_mask": mask}."""
+    from scouter.rl.rllib_wrapper import FlatObsWrapper
 
-    env = ScoutFlatAEC(num_rounds=1, reward_mode="score_diff")
+    env = FlatObsWrapper(ScoutEnv(num_rounds=1, reward_mode="score_diff"))
     env.reset(seed=42)
     obs = env.observe(env.agent_selection)
     assert "observations" in obs, "Missing 'observations' key"
@@ -683,10 +683,10 @@ def test_flat_aec_obs_shape():
 
 
 def test_flat_aec_tempo_rule():
-    """After a scout, ScoutFlatAEC should keep the same agent as current."""
-    from scouter.rl.rllib_wrapper import ScoutFlatAEC
+    """After a scout, FlatObsWrapper should keep the same agent as current."""
+    from scouter.rl.rllib_wrapper import FlatObsWrapper
 
-    env = ScoutFlatAEC(num_rounds=1, reward_mode="score_diff")
+    env = FlatObsWrapper(ScoutEnv(num_rounds=1, reward_mode="score_diff"))
     env.reset(seed=42)
 
     # First player must show

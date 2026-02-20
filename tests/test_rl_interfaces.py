@@ -221,19 +221,17 @@ def test_collect_grpo_dataset_custom_reward():
 
 
 # ---------------------------------------------------------------------------
-# RLlib wrapper (does not require ray to be installed)
+# RLlib wrapper symbols
 # ---------------------------------------------------------------------------
 
 
-def test_rllib_wrapper_raises_without_ray():
-    """ScoutRllibEnv raises ImportError gracefully when ray is not installed."""
-    try:
-        import ray  # noqa: F401
-        pytest.skip("ray is installed; skipping ImportError test")
-    except ImportError:
-        pass
+def test_rllib_wrapper_exports():
+    from scouter.rl.rllib_wrapper import (
+        FlatObsWrapper,
+        ScoutActionMaskRLModule,
+        register_scout_env,
+    )
 
-    from scouter.rl.rllib_wrapper import ScoutRllibEnv
-
-    with pytest.raises(ImportError, match="ray\\[rllib\\]"):
-        ScoutRllibEnv()
+    assert FlatObsWrapper is not None
+    assert ScoutActionMaskRLModule is not None
+    assert callable(register_scout_env)

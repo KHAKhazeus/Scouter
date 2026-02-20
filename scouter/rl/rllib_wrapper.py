@@ -1,231 +1,195 @@
-"""RLlib integration for ScoutEnv.
-
-Uses RLlib's built-in PettingZooEnv wrapper with a thin AEC adapter that
-flattens observations into the ``{"observations": flat, "action_mask": mask}``
-format expected by RLlib's action-masking RLModules.
-
-Provides:
-- ``ScoutFlatAEC``          -- AEC wrapper that flattens obs for RLlib.
-- ``register_scout_env()``  -- register the env with Ray's tune registry.
-- ``get_ppo_config()``      -- example PPO self-play config with action masking.
-"""
+"""RLlib integration for ScoutEnv with PettingZooEnv + action masking."""
 
 from __future__ import annotations
 
 from typing import Any
 
+import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
-from pettingzoo import AECEnv
+from pettingzoo.utils import BaseWrapper
 
 from scouter.env.game_logic import MAX_ACTIONS
 from scouter.env.scout_env import ScoutEnv
 
+from ray.rllib.algorithms.ppo.torch.default_ppo_torch_rl_module import (
+    DefaultPPOTorchRLModule,
+)
+from ray.rllib.core.columns import Columns
+from ray.rllib.core.rl_module.apis.value_function_api import ValueFunctionAPI
+from ray.rllib.utils.annotations import override
+from ray.rllib.utils.framework import try_import_torch
+from ray.rllib.utils.torch_utils import FLOAT_MIN
+from ray.rllib.utils.typing import TensorType
 
-# ---------------------------------------------------------------------------
-# AEC wrapper: flatten Dict obs -> {"observations": flat, "action_mask": mask}
-# ---------------------------------------------------------------------------
+torch, _ = try_import_torch()
 
 
-class ScoutFlatAEC(AECEnv):
-    """Thin AEC wrapper that restructures ScoutEnv observations.
+# Keep a fixed ordering so flattening is deterministic across Python versions.
+FLAT_OBS_KEYS: tuple[str, ...] = (
+    "hand",
+    "hand_size",
+    "active_set",
+    "active_set_size",
+    "active_set_owner",
+    "opp_hand_size",
+    "scout_chips",
+    "collected_counts",
+    "collected_cards",
+    "opp_scouted_cards",
+    "opp_scouted_count",
+    "round_num",
+)
 
-    RLlib's ``PettingZooEnv`` passes observations straight through, and
-    RLlib's ``ActionMaskingTorchRLModule`` expects a Dict with two keys:
-        ``"observations"`` -- a flat float32 array of all game state features
-        ``"action_mask"``  -- a float32 array (0/1) of legal actions
 
-    This wrapper sits between ``ScoutEnv`` and ``PettingZooEnv`` to perform
-    that restructuring without modifying ScoutEnv itself.
-    """
+class FlatObsWrapper(BaseWrapper):
+    """Restructure ScoutEnv observations for RLlib action masking."""
 
-    metadata = {
-        "render_modes": ["ansi"],
-        "name": "scout_flat_v0",
-        "is_parallelizable": False,
-    }
-
-    def __init__(self, num_rounds: int = 1, reward_mode: str = "score_diff"):
-        super().__init__()
-        self._inner = ScoutEnv(num_rounds=num_rounds, reward_mode=reward_mode)
-
-        self.possible_agents = list(self._inner.possible_agents)
-        self.agents = list(self._inner.agents)
-
-        flat_size = self._compute_flat_size()
-        obs_space = spaces.Dict({
-            "observations": spaces.Box(
-                -np.inf, np.inf, shape=(flat_size,), dtype=np.float32
-            ),
-            "action_mask": spaces.Box(
-                0.0, 1.0, shape=(MAX_ACTIONS,), dtype=np.float32
-            ),
-        })
-        act_space = spaces.Discrete(MAX_ACTIONS)
-
-        self.observation_spaces = {a: obs_space for a in self.possible_agents}
-        self.action_spaces = {a: act_space for a in self.possible_agents}
-
-    def _compute_flat_size(self) -> int:
-        self._inner.reset(seed=0)
-        sample = self._inner.observe(self.possible_agents[0])
-        return sum(
-            np.asarray(v).size for k, v in sample.items() if k != "action_mask"
+    def __init__(self, env: ScoutEnv):
+        super().__init__(env)
+        self._flat_obs_size = self._compute_flat_obs_size()
+        self._obs_space = spaces.Dict(
+            {
+                "observations": spaces.Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=(self._flat_obs_size,),
+                    dtype=np.float32,
+                ),
+                "action_mask": spaces.Box(
+                    low=0.0,
+                    high=1.0,
+                    shape=(MAX_ACTIONS,),
+                    dtype=np.float32,
+                ),
+            }
         )
 
-    @staticmethod
-    def _flatten_obs(raw: dict) -> dict[str, np.ndarray]:
-        parts = []
-        for k, v in raw.items():
-            if k == "action_mask":
-                continue
-            parts.append(np.asarray(v, dtype=np.float32).flatten())
+    def _compute_flat_obs_size(self) -> int:
+        obs_space = self.env.observation_space(self.env.possible_agents[0])
+        size = 0
+        for key in FLAT_OBS_KEYS:
+            space = obs_space[key]
+            shape = getattr(space, "shape", ())
+            size += int(np.prod(shape, dtype=np.int64)) if shape else 1
+        return size
+
+    def observation_space(self, agent: str) -> spaces.Dict:
+        return self._obs_space
+
+    def observe(self, agent: str) -> dict[str, np.ndarray]:
+        raw = self.env.observe(agent)
+        missing = [k for k in FLAT_OBS_KEYS if k not in raw]
+        if missing:
+            raise KeyError(f"Missing keys in observation for flattening: {missing}")
+
+        parts = [np.asarray(raw[k], dtype=np.float32).reshape(-1) for k in FLAT_OBS_KEYS]
         return {
-            "observations": np.concatenate(parts),
+            "observations": np.concatenate(parts, dtype=np.float32),
             "action_mask": np.asarray(raw["action_mask"], dtype=np.float32),
         }
 
-    # --- AECEnv interface (delegate to inner, transform obs) ---
 
-    def observation_space(self, agent):
-        return self.observation_spaces[agent]
+class ScoutActionMaskRLModule(DefaultPPOTorchRLModule):
+    """PPO RLModule that applies action masking to action logits."""
 
-    def action_space(self, agent):
-        return self.action_spaces[agent]
+    def __init__(
+        self,
+        *,
+        observation_space: gym.Space | None = None,
+        action_space: gym.Space | None = None,
+        inference_only: bool | None = None,
+        learner_only: bool = False,
+        model_config: dict | None = None,
+        catalog_class=None,
+        **kwargs,
+    ):
+        if not isinstance(observation_space, gym.spaces.Dict):
+            raise ValueError(
+                "ScoutActionMaskRLModule requires Dict obs space with "
+                "'observations' and 'action_mask' keys."
+            )
+        self.observation_space_with_mask = observation_space
+        super().__init__(
+            observation_space=observation_space["observations"],
+            action_space=action_space,
+            inference_only=inference_only,
+            learner_only=learner_only,
+            model_config=model_config,
+            catalog_class=catalog_class,
+            **kwargs,
+        )
 
-    @property
-    def agent_selection(self):
-        return self._inner.agent_selection
+    @override(DefaultPPOTorchRLModule)
+    def setup(self):
+        super().setup()
+        # PPO internals need Box obs space during network construction, but
+        # the runtime batches still carry Dict observations with an action mask.
+        self.observation_space = self.observation_space_with_mask
+        self._checked_observations = False
 
-    @agent_selection.setter
-    def agent_selection(self, val):
-        self._inner.agent_selection = val
+    def _check_batch(self, batch: dict[str, TensorType]) -> None:
+        if self._checked_observations:
+            return
 
-    @property
-    def terminations(self):
-        return self._inner.terminations
+        obs = batch.get(Columns.OBS)
+        if not isinstance(obs, dict):
+            raise ValueError(
+                "Expected dict observations with keys 'observations' and 'action_mask'."
+            )
+        if "action_mask" not in obs:
+            raise ValueError("Missing 'action_mask' in observation dict.")
+        if "observations" not in obs:
+            raise ValueError("Missing 'observations' in observation dict.")
+        self._checked_observations = True
 
-    @property
-    def truncations(self):
-        return self._inner.truncations
+    def _preprocess_batch(
+        self, batch: dict[str, TensorType]
+    ) -> tuple[TensorType, dict[str, TensorType]]:
+        self._check_batch(batch)
+        obs = batch[Columns.OBS]
+        action_mask = obs["action_mask"]
+        new_batch = batch.copy()
+        new_batch[Columns.OBS] = obs["observations"]
+        return action_mask, new_batch
 
-    @property
-    def rewards(self):
-        return self._inner.rewards
+    def _mask_logits(
+        self, out: dict[str, TensorType], action_mask: TensorType
+    ) -> dict[str, TensorType]:
+        inf_mask = torch.clamp(torch.log(action_mask), min=FLOAT_MIN)
+        out[Columns.ACTION_DIST_INPUTS] = out[Columns.ACTION_DIST_INPUTS] + inf_mask
+        return out
 
-    @property
-    def infos(self):
-        return self._inner.infos
+    @override(DefaultPPOTorchRLModule)
+    def _forward(self, batch: dict[str, Any], **kwargs) -> dict[str, Any]:
+        action_mask, new_batch = self._preprocess_batch(batch)
+        out = super()._forward(new_batch, **kwargs)
+        return self._mask_logits(out, action_mask)
 
-    @property
-    def _cumulative_rewards(self):
-        return self._inner._cumulative_rewards
+    @override(DefaultPPOTorchRLModule)
+    def _forward_train(self, batch: dict[str, Any], **kwargs) -> dict[str, Any]:
+        action_mask, new_batch = self._preprocess_batch(batch)
+        out = super()._forward_train(new_batch, **kwargs)
+        return self._mask_logits(out, action_mask)
 
-    def reset(self, seed=None, options=None):
-        self._inner.reset(seed=seed, options=options)
-        self.agents = list(self._inner.agents)
-
-    def observe(self, agent):
-        raw = self._inner.observe(agent)
-        return self._flatten_obs(raw)
-
-    def step(self, action):
-        self._inner.step(action)
-        self.agents = list(self._inner.agents)
-
-    def last(self, observe=True):
-        agent = self._inner.agent_selection
-        obs = self.observe(agent) if observe else None
-        reward = self._inner._cumulative_rewards.get(agent, 0.0)
-        terminated = self._inner.terminations.get(agent, False)
-        truncated = self._inner.truncations.get(agent, False)
-        info = dict(self._inner.infos.get(agent, {}))
-        self._inner._cumulative_rewards[agent] = 0.0
-        return obs, reward, terminated, truncated, info
-
-    def render(self):
-        return self._inner.render()
-
-    def close(self):
-        self._inner.close()
-
-    @property
-    def unwrapped(self):
-        return self._inner
-
-
-# ---------------------------------------------------------------------------
-# Registration + config helpers
-# ---------------------------------------------------------------------------
+    @override(ValueFunctionAPI)
+    def compute_values(self, batch: dict[str, Any], embeddings=None):
+        if isinstance(batch.get(Columns.OBS), dict):
+            _, batch = self._preprocess_batch(batch)
+        return super().compute_values(batch, embeddings)
 
 
 def register_scout_env(env_name: str = "scout_v0") -> None:
-    """Register the Scout env with Ray's tune registry."""
+    """Register Scout as an RLlib environment via PettingZooEnv."""
     from ray.rllib.env.wrappers.pettingzoo_env import PettingZooEnv
     from ray.tune.registry import register_env
 
-    def _env_creator(config):
-        nr = config.get("num_rounds", 1)
-        rm = config.get("reward_mode", "score_diff")
-        return PettingZooEnv(ScoutFlatAEC(num_rounds=nr, reward_mode=rm))
+    def _env_creator(config: dict[str, Any]):
+        config = config or {}
+        num_rounds = int(config.get("num_rounds", 1))
+        reward_mode = str(config.get("reward_mode", "score_diff"))
+        return PettingZooEnv(
+            FlatObsWrapper(ScoutEnv(num_rounds=num_rounds, reward_mode=reward_mode))
+        )
 
     register_env(env_name, _env_creator)
-
-
-def get_ppo_config(
-    env_name: str = "scout_v0",
-    num_env_runners: int = 2,
-    train_batch_size: int = 4000,
-    sgd_minibatch_size: int = 128,
-    num_sgd_iter: int = 10,
-    lr: float = 3e-4,
-) -> Any:
-    """Return a PPO config for self-play Scout training with action masking.
-
-    Uses the new API stack (RLModule + Learner) with
-    ``ActionMaskingTorchRLModule`` from RLlib's examples.
-    Both agents share one policy ("shared_policy"), following the
-    waterworld parameter-sharing pattern.
-    """
-    from ray.rllib.algorithms.ppo import PPOConfig
-    from ray.rllib.core.rl_module.rl_module import RLModuleSpec
-    from ray.rllib.core.rl_module.multi_rl_module import MultiRLModuleSpec
-    from ray.rllib.examples.rl_modules.classes.action_masking_rlm import (
-        ActionMaskingTorchRLModule,
-    )
-
-    register_scout_env(env_name)
-
-    config = (
-        PPOConfig()
-        .environment(
-            env=env_name,
-            env_config={"num_rounds": 1, "reward_mode": "score_diff"},
-        )
-        .env_runners(num_env_runners=num_env_runners)
-        .multi_agent(
-            policies={"shared_policy"},
-            policy_mapping_fn=lambda agent_id, *args, **kwargs: "shared_policy",
-        )
-        .rl_module(
-            rl_module_spec=MultiRLModuleSpec(
-                rl_module_specs={
-                    "shared_policy": RLModuleSpec(
-                        module_class=ActionMaskingTorchRLModule,
-                        model_config={
-                            "head_fcnet_hiddens": [256, 256],
-                            "head_fcnet_activation": "relu",
-                        },
-                    ),
-                },
-            ),
-        )
-        .training(
-            train_batch_size_per_learner=train_batch_size,
-            minibatch_size=sgd_minibatch_size,
-            num_epochs=num_sgd_iter,
-            lr=lr,
-            vf_loss_coeff=0.5,
-        )
-    )
-    return config
