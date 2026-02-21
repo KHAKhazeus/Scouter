@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from gymnasium import spaces
 
-from scouter.env.game_logic import MAX_ACTIONS, N_SHOW
+from scouter.env.game_logic import MAX_ACTIONS, N_SCOUT, N_SHOW, ORIENT_KEEP
 from scouter.env.scout_env import ScoutEnv
 from scouter.rl.rllib_wrapper import (
     FLAT_OBS_KEYS,
@@ -26,7 +26,7 @@ def _first_show_action(env, agent: str) -> int | None:
 
 def _first_scout_action(env, agent: str) -> int | None:
     obs = env.observe(agent)
-    valid_scout = np.where(obs["action_mask"][N_SHOW:])[0]
+    valid_scout = np.where(obs["action_mask"][N_SHOW : N_SHOW + N_SCOUT])[0]
     if len(valid_scout) == 0:
         return None
     return int(valid_scout[0]) + N_SHOW
@@ -52,11 +52,13 @@ def test_flat_obs_wrapper_tempo_rule_after_scout():
     env.reset(seed=42)
 
     first_agent = env.agent_selection
+    env.step(ORIENT_KEEP)
     show = _first_show_action(env, first_agent)
     assert show is not None
     env.step(show)
 
     scout_agent = env.agent_selection
+    env.step(ORIENT_KEEP)
     scout = _first_scout_action(env, scout_agent)
     if scout is None:
         pytest.skip("No scout action available for this seed")

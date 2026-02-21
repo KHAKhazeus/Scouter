@@ -5,7 +5,10 @@ import pytest
 
 from scouter.env.game_logic import (
     MAX_ACTIONS,
+    N_SCOUT,
     N_SHOW,
+    ORIENT_FLIP,
+    ORIENT_KEEP,
     encode_scout,
     encode_show,
     valid_show_slices,
@@ -88,16 +91,17 @@ def test_observation_in_space():
 # ---------------------------------------------------------------------------
 
 
-def test_first_action_must_be_show():
-    """At game start there is no active set, so only Show actions are valid."""
+def test_first_action_must_be_orientation():
+    """At game start, only orientation actions are valid."""
     env = ScoutEnv()
     env.reset(seed=3)
     agent = env.agent_selection
     obs = env.observe(agent)
     mask = obs["action_mask"]
-    # No scout actions should be valid
-    scout_valid = mask[N_SHOW:].any()
-    assert not scout_valid, "Scout actions should be masked at game start (no active set)"
+    assert mask[ORIENT_KEEP] == 1
+    assert mask[ORIENT_FLIP] == 1
+    assert not mask[:N_SHOW].any()
+    assert not mask[N_SHOW : N_SHOW + N_SCOUT].any()
 
 
 def test_mask_invalid_actions_raise():
@@ -148,7 +152,7 @@ def _first_scout_action(env, agent):
     """Return the first valid scout action for agent, or None."""
     obs = env.observe(agent)
     mask = obs["action_mask"]
-    for i in range(N_SHOW, MAX_ACTIONS):
+    for i in range(N_SHOW, N_SHOW + N_SCOUT):
         if mask[i]:
             return i
     return None
@@ -164,19 +168,30 @@ def _first_show_action(env, agent):
     return None
 
 
+def _commit_orientation(env, agent: str, *, flip: bool = False) -> None:
+    obs = env.observe(agent)
+    mask = obs["action_mask"]
+    action = ORIENT_FLIP if flip else ORIENT_KEEP
+    if mask[action] != 1:
+        pytest.skip(f"Orientation action not available for {agent}")
+    env.step(action)
+
+
 def test_tempo_rule_scout_keeps_turn():
     """After a Scout, agent_selection does NOT advance."""
     env = ScoutEnv()
     env.reset(seed=42)
 
-    # First, player_0 must Show (no active set)
+    # First, player_0 must choose orientation, then show.
+    _commit_orientation(env, "player_0")
     p0_show = _first_show_action(env, "player_0")
     assert p0_show is not None
     env.step(p0_show)
 
-    # Now player_1's turn; player_1 must show or scout
-    # We need player_1 to be able to scout
+    # player_1 must choose orientation first, then may scout/show.
     p1 = env.agent_selection
+    _commit_orientation(env, p1)
+    # We need player_1 to be able to scout
     scout = _first_scout_action(env, p1)
     if scout is None:
         pytest.skip("No scout action available in this seed — skip tempo test")
@@ -197,6 +212,7 @@ def test_no_scout_without_chips():
     env._chips["player_0"] = 0
 
     # Need an active set first
+    _commit_orientation(env, "player_0")
     p0_show = _first_show_action(env, "player_0")
     if p0_show is None:
         pytest.skip("Cannot show in this seed")
@@ -204,7 +220,7 @@ def test_no_scout_without_chips():
     # Just check the mask directly
     obs = env.observe("player_0")
     mask = obs["action_mask"]
-    scout_valid = mask[N_SHOW:].any()
+    scout_valid = mask[N_SHOW : N_SHOW + N_SCOUT].any()
     # If chips=0, scouts must all be masked
     # (they would be masked regardless until it's player_0's turn after a show)
     # We test it is 0 chips means no scouts
@@ -235,6 +251,7 @@ def test_round_ends_when_player_stuck():
     env._active_owner = "player_0"
     env._chips["player_1"] = 0  # no chips
     env.agent_selection = "player_1"
+    env._pre_round_phase["player_1"] = False
 
     # player_1's turn: they can't show (nothing beats [5,5,5]) and can't scout (0 chips)
     mask = env._build_action_mask("player_1")
@@ -251,6 +268,7 @@ def test_round_ends_when_player_stuck():
     env2._chips["player_1"] = 0
     env2._collected_cards = {"player_0": [], "player_1": []}
     env2._scouted_log = {"player_0": [], "player_1": []}
+    env2._pre_round_phase = {"player_0": False, "player_1": False}
     env2.agent_selection = "player_0"
 
     # player_0 shows [5,5,5] (indices 0..2)
@@ -325,10 +343,12 @@ def test_scout_chip_goes_to_center():
     env = ScoutEnv()
     env.reset(seed=42)
 
+    _commit_orientation(env, "player_0")
     p0_show = _first_show_action(env, "player_0")
     env.step(p0_show)
 
     p1 = env.agent_selection
+    _commit_orientation(env, p1)
     p1_chips_before = env._chips[p1]
     p0_chips_before = env._chips["player_0"]
 
@@ -368,14 +388,15 @@ def test_beater_collects_active_set():
     env = ScoutEnv()
     env.reset(seed=0)
 
-    env._hands["player_0"] = [Card(3, 4)]
-    env._hands["player_1"] = [Card(5, 6)]
+    env._hands["player_0"] = [Card(3, 4), Card(1, 2)]
+    env._hands["player_1"] = [Card(5, 6), Card(7, 8)]
     env._active_set = []
     env._active_owner = None
     env._chips = {"player_0": 3, "player_1": 3}
     env._collected = {"player_0": 0, "player_1": 0}
     env._collected_cards = {"player_0": [], "player_1": []}
     env._scouted_log = {"player_0": [], "player_1": []}
+    env._pre_round_phase = {"player_0": False, "player_1": False}
     env.agent_selection = "player_0"
 
     env.step(encode_show(0, 0))
@@ -410,6 +431,7 @@ def test_collected_cards_identity_tracked():
     env._collected = {"player_0": 0, "player_1": 0}
     env._collected_cards = {"player_0": [], "player_1": []}
     env._scouted_log = {"player_0": [], "player_1": []}
+    env._pre_round_phase = {"player_0": False, "player_1": False}
     env.agent_selection = "player_0"
 
     # player_0 shows Card(3,4) at index 0 → value 3, hand still has Card(1,2)
@@ -439,12 +461,14 @@ def test_opponent_scouted_cards_in_observation():
     env.reset(seed=42)
 
     # player_0 shows first
+    _commit_orientation(env, "player_0")
     p0_show = _first_show_action(env, "player_0")
     assert p0_show is not None
     env.step(p0_show)
 
     # player_1 scouts
     p1 = env.agent_selection
+    _commit_orientation(env, p1)
     scout = _first_scout_action(env, p1)
     if scout is None:
         pytest.skip("No scout action available")
@@ -481,6 +505,7 @@ def test_history_records_show_and_scout():
     assert len(env._history) == 0
 
     # Play a show
+    _commit_orientation(env, "player_0")
     p0_show = _first_show_action(env, "player_0")
     env.step(p0_show)
     assert len(env._history) >= 1
@@ -489,6 +514,7 @@ def test_history_records_show_and_scout():
 
     # Scout if possible
     p1 = env.agent_selection
+    _commit_orientation(env, p1)
     scout = _first_scout_action(env, p1)
     if scout is not None:
         env.step(scout)
@@ -689,18 +715,24 @@ def test_flat_aec_tempo_rule():
     env = FlatObsWrapper(ScoutEnv(num_rounds=1, reward_mode="score_diff"))
     env.reset(seed=42)
 
-    # First player must show
+    # First player must orient then show.
     agent = env.agent_selection
+    obs = env.observe(agent)
+    assert obs["action_mask"][ORIENT_KEEP] == 1
+    env.step(ORIENT_KEEP)
     obs = env.observe(agent)
     mask = obs["action_mask"]
     valid_show = np.where(mask[:N_SHOW])[0]
     env.step(int(valid_show[0]))
 
-    # Opponent tries to scout
+    # Opponent orients, then tries to scout.
     opp = env.agent_selection
     obs2 = env.observe(opp)
+    assert obs2["action_mask"][ORIENT_KEEP] == 1
+    env.step(ORIENT_KEEP)
+    obs2 = env.observe(opp)
     mask2 = obs2["action_mask"]
-    valid_scout = np.where(mask2[N_SHOW:])[0]
+    valid_scout = np.where(mask2[N_SHOW : N_SHOW + N_SCOUT])[0]
     if len(valid_scout) > 0:
         env.step(int(valid_scout[0]) + N_SHOW)
         assert env.agent_selection == opp, (

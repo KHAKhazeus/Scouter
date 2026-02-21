@@ -125,7 +125,10 @@ def valid_scout_insertions(hand_size: int) -> list[int]:
 MAX_HAND: int = 14
 N_SHOW: int = MAX_HAND * MAX_HAND  # 196
 N_SCOUT: int = 2 * 2 * (MAX_HAND + 1)  # 60
-MAX_ACTIONS: int = N_SHOW + N_SCOUT  # 256
+N_ORIENT: int = 2  # keep or flip whole hand at round start
+ORIENT_KEEP: int = N_SHOW + N_SCOUT
+ORIENT_FLIP: int = N_SHOW + N_SCOUT + 1
+MAX_ACTIONS: int = N_SHOW + N_SCOUT + N_ORIENT  # 258
 
 
 def encode_show(start: int, end: int) -> int:
@@ -161,7 +164,20 @@ def is_show_action(action: int) -> bool:
 
 
 def is_scout_action(action: int) -> bool:
-    return N_SHOW <= action < MAX_ACTIONS
+    return N_SHOW <= action < (N_SHOW + N_SCOUT)
+
+
+def is_orientation_action(action: int) -> bool:
+    return action in (ORIENT_KEEP, ORIENT_FLIP)
+
+
+def decode_orientation(action: int) -> int:
+    """Decode orientation action to 0=keep, 1=flip."""
+    if action == ORIENT_KEEP:
+        return 0
+    if action == ORIENT_FLIP:
+        return 1
+    raise ValueError(f"Action {action} is not an orientation action")
 
 
 # ---------------------------------------------------------------------------

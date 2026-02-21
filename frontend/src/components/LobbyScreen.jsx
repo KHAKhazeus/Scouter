@@ -1,12 +1,38 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 
 const SEATS = ['player_0', 'player_1', 'spectator']
+const HUMAN_SEATS = ['player_0', 'player_1']
 
 export default function LobbyScreen({ onJoined }) {
   const [gameId, setGameId] = useState('')
   const [seat, setSeat] = useState('player_0')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  const [agents, setAgents] = useState([])
+  const [agentId, setAgentId] = useState('')
+  const [agentSeat, setAgentSeat] = useState('player_0')
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadAgents() {
+      try {
+        const res = await fetch('/agents/deployed')
+        if (!res.ok) return
+        const data = await res.json()
+        if (cancelled) return
+        const list = data.agents || []
+        setAgents(list)
+        if (!agentId && list.length > 0) setAgentId(list[0].agent_id)
+      } catch {
+        // Keep lobby usable even if agent API is unavailable.
+      }
+    }
+    loadAgents()
+    return () => {
+      cancelled = true
+    }
+  }, [agentId])
 
   async function handleCreate() {
     setLoading(true)
@@ -29,14 +55,92 @@ export default function LobbyScreen({ onJoined }) {
       return
     }
     setError('')
-    // The GameBoard will initiate the WebSocket connection; just pass along
     onJoined(gameId.trim(), seat)
+  }
+
+  async function handlePlayAgent() {
+    if (!agentId) {
+      setError('No deployed agent selected')
+      return
+    }
+    setLoading(true)
+    setError('')
+    try {
+      const res = await fetch('/agent-game', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agent_id: agentId,
+          human_seat: agentSeat,
+          num_rounds: 2,
+          reward_mode: 'raw',
+        })
+      })
+      if (!res.ok) {
+        const msg = await res.text()
+        throw new Error(`Failed to create agent game: ${msg}`)
+      }
+      const data = await res.json()
+      onJoined(data.game_id, agentSeat)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
     <div className="lobby">
       <h1>Scout</h1>
       <p className="tagline">The double-number card game — 2 players, 2 rounds.</p>
+
+      <div className="lobby-card">
+        <h2>Play Vs Agent</h2>
+        {agents.length === 0 ? (
+          <p className="tagline" style={{ marginBottom: 12 }}>No deployed agents found in <code>deployed_agents/</code>.</p>
+        ) : (
+          <>
+            <div className="input-row" style={{ marginBottom: 10 }}>
+              <select
+                value={agentId}
+                onChange={e => setAgentId(e.target.value)}
+                style={{
+                  flex: 1,
+                  background: 'var(--surface2)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 8,
+                  padding: '10px 14px',
+                  color: 'var(--text)',
+                }}
+              >
+                {agents.map(a => (
+                  <option key={a.agent_id} value={a.agent_id}>
+                    {a.name || a.agent_id} ({a.agent_id})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="seat-picker">
+              {HUMAN_SEATS.map(s => (
+                <button
+                  key={s}
+                  className={`seat-btn${agentSeat === s ? ' selected' : ''}`}
+                  onClick={() => setAgentSeat(s)}
+                >
+                  {s === 'player_0' ? 'You = Player 1' : 'You = Player 2'}
+                </button>
+              ))}
+            </div>
+            <button
+              className="btn btn-primary btn-full"
+              onClick={handlePlayAgent}
+              disabled={loading || !agentId}
+            >
+              {loading ? 'Starting…' : 'Start Vs Agent (2 Rounds)'}
+            </button>
+          </>
+        )}
+      </div>
 
       {/* Create new game */}
       <div className="lobby-card">

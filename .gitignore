@@ -222,3 +222,8 @@ node_modules/
 .pnp.*
 *.tsbuildinfo
 .eslintcache
+
+# ── Deployed RL Agents ───────────────────────────────────
+deployed_agents/
+nohup.out
+outputs/

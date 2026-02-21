@@ -7,7 +7,9 @@
 export const MAX_HAND = 14
 export const N_SHOW = MAX_HAND * MAX_HAND   // 196
 export const N_SCOUT = 2 * 2 * (MAX_HAND + 1) // 60
-export const MAX_ACTIONS = N_SHOW + N_SCOUT   // 256
+export const ORIENT_KEEP = N_SHOW + N_SCOUT
+export const ORIENT_FLIP = N_SHOW + N_SCOUT + 1
+export const MAX_ACTIONS = N_SHOW + N_SCOUT + 2   // 258
 
 export function encodeShow(start, end) {
   return start * MAX_HAND + end
@@ -22,7 +24,7 @@ export function encodeScout(side, flip, insertPos) {
 }
 
 export function decodeScout(action) {
-  if (action < N_SHOW || action >= MAX_ACTIONS) throw new Error('Not a scout action')
+  if (action < N_SHOW || action >= (N_SHOW + N_SCOUT)) throw new Error('Not a scout action')
   const idx = action - N_SHOW
   const side = Math.floor(idx / (2 * (MAX_HAND + 1)))
   const remainder = idx % (2 * (MAX_HAND + 1))
@@ -36,7 +38,11 @@ export function isShowAction(action) {
 }
 
 export function isScoutAction(action) {
-  return action >= N_SHOW && action < MAX_ACTIONS
+  return action >= N_SHOW && action < (N_SHOW + N_SCOUT)
+}
+
+export function isOrientationAction(action) {
+  return action === ORIENT_KEEP || action === ORIENT_FLIP
 }
 
 /**
@@ -61,7 +67,7 @@ export function validShowsFromMask(mask, handCards) {
  */
 export function validScoutsFromMask(mask) {
   const scouts = []
-  for (let i = N_SHOW; i < MAX_ACTIONS; i++) {
+  for (let i = N_SHOW; i < N_SHOW + N_SCOUT; i++) {
     if (!mask[i]) continue
     const [side, flip, insertPos] = decodeScout(i)
     scouts.push({ side, flip, insertPos, actionIdx: i })

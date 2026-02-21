@@ -29,6 +29,14 @@ function formatEntry(entry, mySeat) {
     }
   }
 
+  if (entry.action === 'orientation') {
+    const choice = entry.choice === 'flip' ? 'flipped hand orientation' : 'kept hand orientation'
+    return {
+      text: `${p} ${choice}`,
+      cls: 'hist-scout',
+    }
+  }
+
   if (entry.action === 'round_end') {
     const scores = Object.entries(entry.scores)
       .map(([a, s]) => `${playerLabel(a, mySeat)}: ${s >= 0 ? '+' : ''}${s}`)

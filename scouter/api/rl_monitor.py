@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 
 router = APIRouter(prefix="/rl", tags=["rl-monitor"])
 
@@ -62,6 +62,7 @@ def list_runs() -> dict[str, Any]:
                 "latest_iteration": manifest.get("latest_iteration", 0),
                 "latest_eval_iteration": manifest.get("latest_eval_iteration"),
                 "num_snapshots": len(manifest.get("snapshots", [])),
+                "eval_game_count": manifest.get("eval_game_count", 0),
             }
         )
 
@@ -85,18 +86,23 @@ def run_summary(run_id: str) -> dict[str, Any]:
         "latest_train": train_latest[-1] if train_latest else None,
         "latest_eval_rows": eval_latest,
         "latest_eval_summary": leaderboard.get("latest_eval") if leaderboard else None,
+        "latest_eval_games": leaderboard.get("latest_eval_games", []),
+        "training_state": manifest.get("training_state", {}),
+        "timeouts": manifest.get("timeouts", {}),
     }
 
 
 @router.get("/runs/{run_id}/train")
-def run_train(run_id: str, limit: int = Query(default=1000, ge=1, le=100000)) -> dict[str, Any]:
+def run_train(run_id: str, limit: int = 1000) -> dict[str, Any]:
     run_dir = _run_dir(run_id)
+    limit = max(1, min(limit, 100000))
     return {"run_id": run_id, "rows": _load_jsonl(run_dir / "train_metrics.jsonl", limit=limit)}
 
 
 @router.get("/runs/{run_id}/evolution")
-def run_evolution(run_id: str, limit: int = Query(default=1000, ge=1, le=100000)) -> dict[str, Any]:
+def run_evolution(run_id: str, limit: int = 1000) -> dict[str, Any]:
     run_dir = _run_dir(run_id)
+    limit = max(1, min(limit, 100000))
     return {"run_id": run_id, "rows": _load_jsonl(run_dir / "eval_metrics.jsonl", limit=limit)}
 
 
@@ -110,3 +116,73 @@ def run_snapshots(run_id: str) -> dict[str, Any]:
         "run_id": run_id,
         "snapshots": manifest.get("snapshots", []),
     }
+
+
+@router.get("/runs/{run_id}/eval-games")
+def run_eval_games(
+    run_id: str,
+    limit: int = 2000,
+    iteration: int | None = None,
+    opponent_type: str | None = None,
+    opponent_snapshot: str | None = None,
+) -> dict[str, Any]:
+    run_dir = _run_dir(run_id)
+    rows = _load_jsonl(run_dir / "eval_games.jsonl", limit=None)
+    limit = max(1, min(limit, 200000))
+
+    if iteration is not None:
+        rows = [r for r in rows if int(r.get("iteration", -1)) == int(iteration)]
+    if opponent_type is not None:
+        rows = [r for r in rows if r.get("opponent_type") == opponent_type]
+    if opponent_snapshot is not None:
+        rows = [r for r in rows if r.get("opponent_snapshot") == opponent_snapshot]
+
+    rows = rows[-limit:]
+    return {"run_id": run_id, "rows": rows}
+
+
+@router.get("/runs/{run_id}/eval-games/{game_id}")
+def run_eval_game_replay(run_id: str, game_id: str) -> dict[str, Any]:
+    run_dir = _run_dir(run_id)
+    rows = _load_jsonl(run_dir / "eval_games.jsonl", limit=None)
+    match = next((r for r in rows if r.get("game_id") == game_id), None)
+    if match is None:
+        raise HTTPException(status_code=404, detail=f"Game '{game_id}' not found")
+
+    replay_path = match.get("replay_path")
+    if not replay_path:
+        raise HTTPException(status_code=404, detail="Replay path missing for selected game")
+
+    replay_file = Path(replay_path)
+    if not replay_file.exists():
+        raise HTTPException(status_code=404, detail=f"Replay file not found: {replay_file}")
+
+    replay = _load_json(replay_file, default={})
+    return {
+        "run_id": run_id,
+        "game": match,
+        "replay": replay,
+    }
+
+
+@router.get("/runs/{run_id}/status")
+def run_status(run_id: str) -> dict[str, Any]:
+    run_dir = _run_dir(run_id)
+    manifest = _load_json(run_dir / "manifest.json", default={})
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Manifest not found")
+    return {
+        "run_id": run_id,
+        "latest_iteration": manifest.get("latest_iteration", 0),
+        "latest_eval_iteration": manifest.get("latest_eval_iteration"),
+        "training_state": manifest.get("training_state", {}),
+        "timeouts": manifest.get("timeouts", {}),
+        "resume_count": manifest.get("resume_count", 0),
+    }
+
+
+@router.get("/runs/{run_id}/events")
+def run_events(run_id: str, limit: int = 500) -> dict[str, Any]:
+    run_dir = _run_dir(run_id)
+    limit = max(1, min(limit, 200000))
+    return {"run_id": run_id, "rows": _load_jsonl(run_dir / "events.jsonl", limit=limit)}

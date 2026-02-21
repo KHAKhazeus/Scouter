@@ -142,6 +142,8 @@ def format_observation(
         {chr(10).join('  ' + line for line in action_lines) if action_lines else '  (none — game over)'}
 
         Respond with a JSON action, for example:
+          {{"action": "orient", "flip": false}}
+          {{"action": "orient", "flip": true}}
           {{"action": "show", "start": 1, "end": 3}}
           {{"action": "scout", "side": "left", "flip": false, "insert": 2}}
         (positions are 1-based)
@@ -154,7 +156,13 @@ def _describe_valid_actions(
     hand_cards: list[tuple[int, int, int]],
     active_cards: list[tuple[int, int, int]],
 ) -> list[str]:
-    from scouter.env.game_logic import N_SHOW, decode_show, decode_scout
+    from scouter.env.game_logic import (
+        N_SHOW,
+        decode_orientation,
+        decode_scout,
+        decode_show,
+        is_orientation_action,
+    )
 
     lines: list[str] = []
     seen_show: set[tuple[int, int]] = set()
@@ -173,6 +181,9 @@ def _describe_valid_actions(
                 lines.append(
                     f'SHOW cards {start+1}–{end+1}: [{val_str}] ({set_type})'
                 )
+        elif is_orientation_action(idx):
+            choice = decode_orientation(idx)
+            lines.append("ORIENT hand: keep current orientation" if choice == 0 else "ORIENT hand: flip whole hand")
         else:
             side, flip, insert_pos = decode_scout(idx)
             if (side, flip, insert_pos) not in seen_scout:

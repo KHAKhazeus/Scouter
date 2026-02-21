@@ -30,11 +30,42 @@ def test_rl_monitor_readers(tmp_path, monkeypatch):
             "latest_iteration": 10,
             "latest_eval_iteration": 10,
             "snapshots": [{"snapshot_id": "iter_10", "path": "/tmp/snap"}],
+            "training_state": {"phase": "idle"},
+            "timeouts": {"total_eval_timeouts": 0, "consecutive_eval_timeouts": 0},
         },
     )
     _write_json(run / "leaderboard.json", {"latest_eval": {"win_rate_vs_random": 0.5}})
     _write_jsonl(run / "train_metrics.jsonl", [{"iteration": 10, "episode_return_mean": 0.0}])
     _write_jsonl(run / "eval_metrics.jsonl", [{"iteration": 10, "opponent_type": "random", "win_rate": 0.5}])
+    _write_jsonl(
+        run / "events.jsonl",
+        [
+            {
+                "timestamp": "2026-02-20T00:00:01Z",
+                "event": "TRAIN_ITER_DONE",
+                "iteration": 10,
+                "details": {"timesteps_total": 8192},
+            }
+        ],
+    )
+    replay_file = run / "replay_game_1.json"
+    _write_json(replay_file, {"game_id": "game_1", "steps": [{"step_idx": 0}]})
+    _write_jsonl(
+        run / "eval_games.jsonl",
+        [
+            {
+                "game_id": "game_1",
+                "iteration": 10,
+                "opponent_type": "random",
+                "opponent_snapshot": None,
+                "score_diff": 2.0,
+                "candidate_score": 8.0,
+                "opponent_score": 6.0,
+                "outcome": "win",
+                "replay_path": str(replay_file),
+            }
+        ],
+    )
 
     monkeypatch.setenv("RL_RUNS_ROOT", str(runs_root))
 
@@ -52,6 +83,18 @@ def test_rl_monitor_readers(tmp_path, monkeypatch):
 
     snaps = rl_monitor.run_snapshots("run_test")
     assert snaps["snapshots"][0]["snapshot_id"] == "iter_10"
+
+    games = rl_monitor.run_eval_games("run_test", limit=100)
+    assert games["rows"][0]["game_id"] == "game_1"
+    replay = rl_monitor.run_eval_game_replay("run_test", "game_1")
+    assert replay["replay"]["steps"][0]["step_idx"] == 0
+
+    status = rl_monitor.run_status("run_test")
+    assert status["latest_iteration"] == 10
+    assert status["training_state"]["phase"] == "idle"
+
+    events = rl_monitor.run_events("run_test", limit=100)
+    assert events["rows"][0]["event"] == "TRAIN_ITER_DONE"
 
 
 

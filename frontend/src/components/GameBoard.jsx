@@ -8,6 +8,8 @@ import Card from './Card.jsx'
 import HistoryPanel from './HistoryPanel.jsx'
 import RoundSummary from './RoundSummary.jsx'
 import {
+  ORIENT_FLIP,
+  ORIENT_KEEP,
   encodeShow,
   encodeScout,
   validScoutsFromMask,
@@ -22,7 +24,7 @@ import {
  *   onLeave - fn()
  */
 export default function GameBoard({ gameId, seat, onLeave }) {
-  const { state, connected, sendAction, sendFlipHand, sendChat, messages, error } =
+  const { state, connected, sendAction, sendChat, messages, error } =
     useGameSocket(gameId, seat)
 
   const gameOver    = state?.game_over ?? false
@@ -146,7 +148,8 @@ export default function GameBoard({ gameId, seat, onLeave }) {
     }
   }, [state?.round])
 
-  const canFlip      = seat !== 'spectator' && (state?.can_flip_hand?.[seat] ?? false)
+  const orientationPending = seat !== 'spectator' && (state?.orientation_pending?.[seat] ?? false)
+  const canFlip = orientationPending && isMyTurn
   const showFlipModal = canFlip && !flipModalDone
 
   // ── Round summary banner ─────────────────────────────────────────────────
@@ -276,10 +279,22 @@ export default function GameBoard({ gameId, seat, onLeave }) {
           </div>
 
           <div className="flip-modal-actions">
-            <button className="btn btn-secondary" onClick={() => { sendFlipHand() }}>
+            <button
+              className="btn btn-secondary"
+              onClick={() => {
+                sendAction(ORIENT_FLIP)
+                setFlipModalDone(true)
+              }}
+            >
               Flip all cards
             </button>
-            <button className="btn btn-primary" onClick={() => setFlipModalDone(true)}>
+            <button
+              className="btn btn-primary"
+              onClick={() => {
+                sendAction(ORIENT_KEEP)
+                setFlipModalDone(true)
+              }}
+            >
               Confirm &amp; Play
             </button>
           </div>

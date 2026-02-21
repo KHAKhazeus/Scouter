@@ -20,12 +20,16 @@ from scouter.env.card import (
 from scouter.env.game_logic import (
     MAX_ACTIONS,
     MAX_HAND,
+    ORIENT_FLIP,
+    ORIENT_KEEP,
     classify_set,
     compute_round_scores,
+    decode_orientation,
     decode_scout,
     decode_show,
     encode_scout,
     encode_show,
+    is_orientation_action,
     is_scout_action,
     is_show_action,
     is_stronger,
@@ -291,6 +295,8 @@ class ScoutEnv(AECEnv):
 
         if action is None:
             raise ValueError("action=None is only valid for terminated/truncated agents")
+        if action < 0 or action >= MAX_ACTIONS:
+            raise ValueError(f"Action {action} out of range [0, {MAX_ACTIONS})")
 
         mask = self._build_action_mask(agent)
         if not mask[action]:
@@ -302,7 +308,9 @@ class ScoutEnv(AECEnv):
         # Reset rewards at start of step (using all possible agents for safety)
         self.rewards = {a: 0.0 for a in self.possible_agents}
 
-        if is_show_action(action):
+        if is_orientation_action(action):
+            self._do_orientation(agent, action)
+        elif is_show_action(action):
             self._do_show(agent, action)
         elif is_scout_action(action):
             self._do_scout(agent, action)
@@ -323,6 +331,31 @@ class ScoutEnv(AECEnv):
     # ------------------------------------------------------------------
     # Action execution
     # ------------------------------------------------------------------
+
+    def _do_orientation(self, agent: str, action: int) -> None:
+        if not self._pre_round_phase.get(agent, False):
+            raise ValueError(f"{agent} has already committed orientation this round")
+        flip = decode_orientation(action)
+        if flip:
+            self._hands[agent] = [c.flipped_copy() for c in reversed(self._hands[agent])]
+        self._pre_round_phase[agent] = False
+        self._history.append(
+            {
+                "round": self._round,
+                "action": "orientation",
+                "player": agent,
+                "choice": "flip" if flip else "keep",
+            }
+        )
+
+        # Same turn continues after orientation commit. If no actions remain, round ends.
+        post_mask = self._build_action_mask(agent)
+        if not post_mask.any():
+            self._round_ender = self._active_owner
+            self._round_end_reason = (
+                f"{agent} is stuck — cannot beat the active set and has no scout chips"
+            )
+            self._end_round()
 
     def _do_show(self, agent: str, action: int) -> None:
         self._pre_round_phase[agent] = False
@@ -530,6 +563,12 @@ class ScoutEnv(AECEnv):
         if self.terminations.get(agent) or self.truncations.get(agent):
             return mask
 
+        # Force one orientation decision per player at round start.
+        if self._pre_round_phase.get(agent, False):
+            mask[ORIENT_KEEP] = 1
+            mask[ORIENT_FLIP] = 1
+            return mask
+
         hand = self._hands.get(agent, [])
         active_vals = [c.value for c in self._active_set]
 
@@ -679,7 +718,7 @@ class ScoutEnv(AECEnv):
     # ------------------------------------------------------------------
 
     def can_flip_hand(self, agent: str) -> bool:
-        """True while this agent's pre-round window is open."""
+        """True while this agent still needs orientation choice."""
         return (
             self._pre_round_phase.get(agent, False)
             and agent in self.agents
@@ -687,15 +726,10 @@ class ScoutEnv(AECEnv):
         )
 
     def flip_player_hand(self, agent: str) -> bool:
-        """Reverse the player's hand and flip every card.
-
-        This mirrors the physical game's "flip the deck from the other end"
-        gesture.  Returns False if the pre-round window has already closed.
-        """
+        """Legacy helper: commit flipped orientation for this round."""
         if not self.can_flip_hand(agent):
             return False
-        hand = self._hands.get(agent, [])
-        self._hands[agent] = [c.flipped_copy() for c in reversed(hand)]
+        self._do_orientation(agent, ORIENT_FLIP)
         return True
 
     # ------------------------------------------------------------------
@@ -724,6 +758,7 @@ class ScoutEnv(AECEnv):
             "cumulative_scores": dict(self._cumulative_scores),
             "action_mask": self._build_action_mask(self.agent_selection).tolist(),
             "can_flip_hand": {a: self.can_flip_hand(a) for a in AGENTS},
+            "orientation_pending": {a: bool(self._pre_round_phase.get(a, False)) for a in AGENTS},
             "game_over": not bool(self.agents),
             "winner": self.final_info.get("winner") if not self.agents else None,
             "history": list(self._history),

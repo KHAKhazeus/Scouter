@@ -7,6 +7,8 @@ import pytest
 
 from scouter.env.game_logic import (
     MAX_ACTIONS,
+    ORIENT_FLIP,
+    ORIENT_KEEP,
     N_SHOW,
     encode_scout,
     encode_show,
@@ -63,8 +65,8 @@ def test_format_observation_contains_hand_info():
 def test_format_observation_contains_legal_actions():
     obs, agent, env = _get_obs()
     prompt = format_observation(obs, agent)
-    # Should mention show actions
-    assert "SHOW" in prompt or "show" in prompt.lower()
+    # At round start orientation actions are expected.
+    assert "ORIENT" in prompt or "orient" in prompt.lower()
 
 
 def test_format_observation_changes_between_turns():
@@ -119,6 +121,18 @@ def test_parse_invalid_returns_minus_one():
     text = "I have no idea what to do"
     action = parse_action(text, hand_size=11)
     assert action == -1
+
+
+def test_parse_orient_json_keep():
+    text = '{"action": "orient", "flip": false}'
+    action = parse_action(text, hand_size=11)
+    assert action == ORIENT_KEEP
+
+
+def test_parse_orient_json_flip():
+    text = '{"action": "orient", "flip": true}'
+    action = parse_action(text, hand_size=11)
+    assert action == ORIENT_FLIP
 
 
 def test_parse_malformed_json_falls_back():

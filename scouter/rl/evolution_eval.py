@@ -10,6 +10,7 @@ import torch
 
 from ray.rllib.algorithms.algorithm import Algorithm
 from ray.rllib.core.columns import Columns
+from ray.rllib.core.rl_module.rl_module import RLModule
 
 from scouter.env.scout_env import AGENTS, ScoutEnv
 from scouter.rl.metrics import utc_now_iso
@@ -17,6 +18,7 @@ from scouter.rl.rllib_wrapper import FlatObsWrapper
 
 
 PolicyFn = Callable[[dict[str, np.ndarray], str, np.random.Generator], int]
+SeatMode = str
 
 
 def _pick_valid_action(obs: dict[str, np.ndarray], rng: np.random.Generator) -> int:
@@ -56,12 +58,82 @@ def make_algo_policy(algo: Algorithm, *, policy_id: str = "shared_policy") -> Po
     return _policy
 
 
+def resolve_module_checkpoint(
+    checkpoint_path: Path,
+    *,
+    policy_id: str = "shared_policy",
+) -> Path:
+    ckpt = checkpoint_path.resolve()
+    return ckpt / "learner_group" / "learner" / "rl_module" / policy_id
+
+
+def load_module_from_checkpoint(
+    checkpoint_path: Path,
+    *,
+    policy_id: str = "shared_policy",
+    device: str = "cpu",
+) -> RLModule:
+    module_ckpt = resolve_module_checkpoint(checkpoint_path, policy_id=policy_id)
+    if not module_ckpt.exists():
+        raise FileNotFoundError(f"RLModule checkpoint not found: {module_ckpt}")
+    module = RLModule.from_checkpoint(module_ckpt)
+    if device and device != "auto":
+        module.to(device)
+    return module
+
+
+def module_device(module: RLModule) -> str:
+    try:
+        return str(next(module.parameters()).device)
+    except (StopIteration, TypeError):
+        return "unknown"
+
+
+def make_module_policy(module: RLModule) -> PolicyFn:
+    target_device = module_device(module)
+
+    def _policy(obs: dict[str, np.ndarray], _agent: str, rng: np.random.Generator) -> int:
+        obs_batch = {
+            "observations": torch.from_numpy(obs["observations"][None, :]).float(),
+            "action_mask": torch.from_numpy(obs["action_mask"][None, :]).float(),
+        }
+        if target_device.startswith("cuda"):
+            obs_batch = {k: v.to(target_device) for k, v in obs_batch.items()}
+        with torch.no_grad():
+            out = module.forward_inference({Columns.OBS: obs_batch})
+
+        logits = out[Columns.ACTION_DIST_INPUTS]
+        if logits.ndim != 2 or logits.shape[0] != 1:
+            return _pick_valid_action(obs, rng)
+        action_idx = int(torch.argmax(logits[0]).item())
+
+        if action_idx < 0 or action_idx >= len(obs["action_mask"]):
+            return _pick_valid_action(obs, rng)
+        if obs["action_mask"][action_idx] <= 0.0:
+            return _pick_valid_action(obs, rng)
+        return action_idx
+
+    return _policy
+
+
+def _candidate_is_p0(game_idx: int, seat_mode: SeatMode, seed: int) -> bool:
+    if seat_mode == "p0":
+        return True
+    if seat_mode == "p1":
+        return False
+    if seat_mode == "random":
+        rng = np.random.default_rng(seed + 99_999 + game_idx)
+        return bool(rng.integers(0, 2) == 0)
+    return (game_idx % 2) == 0
+
+
 def evaluate_matchup(
     candidate_policy: PolicyFn,
     opponent_policy: PolicyFn,
     *,
     num_games: int,
     seed: int,
+    seat_mode: SeatMode = "alternate",
 ) -> dict[str, float]:
     """Evaluate candidate policy against opponent over num_games episodes."""
     wins = 0
@@ -74,7 +146,7 @@ def evaluate_matchup(
         env.reset(seed=seed + game_idx)
 
         # Alternate seats to avoid first-player bias.
-        candidate_is_p0 = (game_idx % 2) == 0
+        candidate_is_p0 = _candidate_is_p0(game_idx, seat_mode=seat_mode, seed=seed)
         rng = np.random.default_rng(seed + 10_000 + game_idx)
 
         while env.agents:
@@ -129,6 +201,8 @@ def evaluate_matchup_detailed(
     num_games: int,
     seed: int,
     num_rounds: int = 1,
+    seat_mode: SeatMode = "alternate",
+    game_idx_offset: int = 0,
 ) -> tuple[dict[str, float], list[dict[str, Any]], list[dict[str, Any]]]:
     """Evaluate matchup and return aggregate metrics + per-game rows + replay docs."""
     wins = 0
@@ -139,12 +213,13 @@ def evaluate_matchup_detailed(
     replay_docs: list[dict[str, Any]] = []
 
     for game_idx in range(num_games):
+        abs_game_idx = game_idx_offset + game_idx
         env = FlatObsWrapper(ScoutEnv(num_rounds=num_rounds, reward_mode="score_diff"))
-        env.reset(seed=seed + game_idx)
-        candidate_is_p0 = (game_idx % 2) == 0
-        rng = np.random.default_rng(seed + 10_000 + game_idx)
+        env.reset(seed=seed + abs_game_idx)
+        candidate_is_p0 = _candidate_is_p0(abs_game_idx, seat_mode=seat_mode, seed=seed)
+        rng = np.random.default_rng(seed + 10_000 + abs_game_idx)
         game_id = (
-            f"iter_{iteration}_{opponent_type}_{opponent_snapshot or 'none'}_{game_idx}"
+            f"iter_{iteration}_{opponent_type}_{opponent_snapshot or 'none'}_{abs_game_idx}"
         )
         steps: list[dict[str, Any]] = []
         action_count = 0
@@ -218,7 +293,7 @@ def evaluate_matchup_detailed(
                 "candidate_snapshot": candidate_snapshot,
                 "opponent_type": opponent_type,
                 "opponent_snapshot": opponent_snapshot,
-                "seed": int(seed + game_idx),
+                "seed": int(seed + abs_game_idx),
                 "candidate_seat": AGENTS[0] if candidate_is_p0 else AGENTS[1],
                 "candidate_score": candidate_score,
                 "opponent_score": opponent_score,
@@ -271,4 +346,5 @@ def build_eval_record(
 
 
 def load_algo_from_checkpoint(path: Path) -> Algorithm:
-    return Algorithm.from_checkpoint(str(path))
+    resolved = path.resolve()
+    return Algorithm.from_checkpoint(resolved.as_uri())

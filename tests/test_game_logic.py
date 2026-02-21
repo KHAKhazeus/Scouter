@@ -5,14 +5,19 @@ import pytest
 from scouter.env.card import Card
 from scouter.env.game_logic import (
     MAX_ACTIONS,
+    N_ORIENT,
     N_SCOUT,
     N_SHOW,
+    ORIENT_FLIP,
+    ORIENT_KEEP,
     classify_set,
     compute_round_scores,
+    decode_orientation,
     decode_scout,
     decode_show,
     encode_scout,
     encode_show,
+    is_orientation_action,
     is_stronger,
     valid_scout_insertions,
     valid_show_slices,
@@ -99,7 +104,7 @@ def test_stronger_tie_returns_false():
     # Same size, same type, same min → tie → cannot show
     assert is_stronger([4, 5, 6], [4, 5, 6]) is False
     # Same min match
-    assert is_stronger([4, 4], [4, 5]) is False  # match vs run, match wins → True
+    assert is_stronger([4, 4], [4, 5]) is True
     # Same min match vs same min match
     assert is_stronger([3, 3], [3, 3]) is False
 
@@ -185,6 +190,14 @@ def test_encode_decode_scout_all():
                 assert N_SHOW <= action < MAX_ACTIONS
                 s, f, i = decode_scout(action)
                 assert s == side and f == flip and i == insert
+
+
+def test_orientation_actions():
+    assert MAX_ACTIONS == N_SHOW + N_SCOUT + N_ORIENT
+    assert is_orientation_action(ORIENT_KEEP)
+    assert is_orientation_action(ORIENT_FLIP)
+    assert decode_orientation(ORIENT_KEEP) == 0
+    assert decode_orientation(ORIENT_FLIP) == 1
 
 
 # ---------------------------------------------------------------------------

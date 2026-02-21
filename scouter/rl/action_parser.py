@@ -8,11 +8,11 @@ from typing import Any
 
 from scouter.env.game_logic import (
     MAX_ACTIONS,
-    N_SHOW,
+    ORIENT_FLIP,
+    ORIENT_KEEP,
     encode_scout,
     encode_show,
     is_scout_action,
-    is_show_action,
 )
 
 
@@ -78,6 +78,14 @@ def _try_json_parse(text: str, hand_size: int) -> int:
         insert_pos = int(insert_raw) - 1  # convert 1-based to 0-based
         return _encode_scout_safe(side, flip, insert_pos, hand_size)
 
+    if action_type in ("orient", "orientation"):
+        flip_raw = obj.get("flip", obj.get("choice", False))
+        if isinstance(flip_raw, str):
+            flip = flip_raw.lower() in ("true", "1", "yes", "flip")
+        else:
+            flip = bool(flip_raw)
+        return ORIENT_FLIP if flip else ORIENT_KEEP
+
     return -1
 
 
@@ -94,9 +102,13 @@ _SCOUT_RE = re.compile(
     re.IGNORECASE,
 )
 _FLIP_RE = re.compile(r"\bflip\b", re.IGNORECASE)
+_ORIENT_RE = re.compile(r"\b(orient|orientation|flip hand|keep hand)\b", re.IGNORECASE)
 
 
 def _try_regex_parse(text: str, hand_size: int) -> int:
+    if _ORIENT_RE.search(text):
+        return ORIENT_FLIP if _FLIP_RE.search(text) else ORIENT_KEEP
+
     m = _SHOW_RE.search(text)
     if m:
         return _encode_show_safe(int(m.group(1)) - 1, int(m.group(2)) - 1)
@@ -127,7 +139,7 @@ def _encode_show_safe(start: int, end: int) -> int:
     if not (0 <= start <= end < MAX_HAND):
         return -1
     action = encode_show(start, end)
-    return action if 0 <= action < N_SHOW else -1
+    return action if 0 <= action < ORIENT_KEEP else -1
 
 
 def _encode_scout_safe(side: int, flip: int, insert_pos: int, hand_size: int) -> int:

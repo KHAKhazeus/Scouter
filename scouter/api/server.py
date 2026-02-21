@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -12,6 +13,8 @@ from fastapi.staticfiles import StaticFiles
 from scouter.api.game_manager import GameManager
 from scouter.api.rl_monitor import router as rl_monitor_router
 from scouter.env.scout_env import AGENTS, ScoutEnv
+from scouter.rl.agent_pool import AgentPool
+from scouter.rl.rllib_wrapper import flatten_obs_dict
 
 app = FastAPI(title="Scout Game Server", version="0.1.0")
 
@@ -25,6 +28,9 @@ app.add_middleware(
 
 manager = GameManager()
 app.include_router(rl_monitor_router)
+agent_pool = AgentPool(Path("deployed_agents"))
+# Use uvicorn logger so inference traces are always visible in standard server logs.
+logger = logging.getLogger("uvicorn.error")
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
@@ -38,6 +44,39 @@ async def create_game() -> dict:
     """Create a new game session and return its ID."""
     session = manager.create_session()
     return {"game_id": session.game_id, "available_seats": AGENTS}
+
+
+@app.get("/agents/deployed")
+async def list_deployed_agents() -> dict:
+    return {"agents": agent_pool.list_deployed()}
+
+
+@app.post("/agent-game")
+async def create_agent_game(payload: dict) -> dict:
+    agent_id = str(payload.get("agent_id", "")).strip()
+    human_seat = str(payload.get("human_seat", "player_0"))
+    num_rounds = int(payload.get("num_rounds", 2))
+    reward_mode = str(payload.get("reward_mode", "raw"))
+
+    if human_seat not in AGENTS:
+        raise HTTPException(status_code=400, detail="human_seat must be player_0 or player_1")
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id is required")
+
+    available = {a["agent_id"] for a in agent_pool.list_deployed()}
+    if agent_id not in available:
+        raise HTTPException(status_code=404, detail=f"Unknown agent_id: {agent_id}")
+
+    session = manager.create_session()
+    session.env = ScoutEnv(num_rounds=num_rounds, reward_mode=reward_mode)
+    session.agent_id = agent_id
+    session.agent_seat = AGENTS[1 - AGENTS.index(human_seat)]
+    return {
+        "game_id": session.game_id,
+        "human_seat": human_seat,
+        "agent_seat": session.agent_seat,
+        "agent_id": session.agent_id,
+    }
 
 
 @app.get("/game/{game_id}/state")
@@ -69,7 +108,7 @@ async def game_ws(websocket: WebSocket, game_id: str, seat: str = "spectator") -
 
     Client → Server messages:
       {"type": "action", "action": <int>}
-      {"type": "set_orientation", "flip_hand": <bool>}   # pre-round flip (not yet impl)
+      {"type": "action", "action": <int>} for orientation/show/scout
 
     Server → Client messages (broadcast after each action):
       {"type": "state", ...}   — see GameSession.state_for_seat()
@@ -111,6 +150,9 @@ async def game_ws(websocket: WebSocket, game_id: str, seat: str = "spectator") -
             "type": "joined",
             "seat": assigned_seat or "spectator",
             "available_seats": session.available_seats(),
+            "agent_session": session.agent_id is not None,
+            "agent_id": session.agent_id,
+            "agent_seat": session.agent_seat,
         }
     )
 
@@ -118,6 +160,7 @@ async def game_ws(websocket: WebSocket, game_id: str, seat: str = "spectator") -
     if not session.started and session.all_seats_filled():
         session.env.reset()
         session.started = True
+        await _auto_play_agent(session)
         await session.broadcast()
 
     # If game already running (reconnect), send current state
@@ -163,23 +206,14 @@ async def game_ws(websocket: WebSocket, game_id: str, seat: str = "spectator") -
                     else:
                         break
 
+                await _auto_play_agent(session)
                 await session.broadcast()
 
             elif msg_type == "flip_hand":
-                if not session.started:
-                    await session.send_error(websocket, "Game has not started yet.")
-                    continue
-                if assigned_seat not in AGENTS:
-                    await session.send_error(websocket, "Spectators cannot flip hands.")
-                    continue
-                ok = session.env.flip_player_hand(assigned_seat)
-                if not ok:
-                    await session.send_error(
-                        websocket,
-                        "Hand flip is only allowed before the first action of a round.",
-                    )
-                    continue
-                await session.broadcast()
+                await session.send_error(
+                    websocket,
+                    "flip_hand is deprecated. Use orientation action from action_mask.",
+                )
 
             elif msg_type == "ping":
                 await websocket.send_json({"type": "pong"})
@@ -201,6 +235,64 @@ async def game_ws(websocket: WebSocket, game_id: str, seat: str = "spectator") -
             del session.players[assigned_seat]
         elif websocket in session.spectators:
             session.spectators.remove(websocket)
+
+
+async def _auto_play_agent(session) -> None:
+    """Advance turns while it is the configured agent's turn."""
+    if not session.agent_id or not session.agent_seat:
+        return
+
+    while session.env.agents and session.env.agent_selection == session.agent_seat:
+        agent = session.env.agent_selection
+        if session.env.terminations.get(agent) or session.env.truncations.get(agent):
+            session.env.step(None)
+            continue
+
+        raw_obs = session.env.observe(agent)
+        obs = flatten_obs_dict(raw_obs)
+        source = "model"
+        meta: dict | None = None
+        try:
+            action, meta = agent_pool.compute_action(
+                agent_id=session.agent_id,
+                obs=obs,
+                return_info=True,
+            )
+            source = str(meta.get("source", "model")) if meta else "model"
+        except Exception as exc:
+            # Fallback to the first valid action if model inference fails.
+            mask = obs["action_mask"]
+            valid = [i for i, m in enumerate(mask) if m > 0]
+            action = int(valid[0]) if valid else 0
+            source = "fallback_first_valid"
+            meta = {"error": repr(exc)}
+
+        raw_id = meta.get("raw_argmax_action") if isinstance(meta, dict) else None
+        device = meta.get("device") if isinstance(meta, dict) else None
+        turn_idx = len(session.env._history) if hasattr(session.env, "_history") else -1
+        msg = (
+            f"[agent-infer] agent_id={session.agent_id} seat={agent} "
+            f"action={action} raw_argmax={raw_id} source={source} device={device} turn={turn_idx}"
+        )
+        logger.info(msg)
+        await _broadcast_system_chat(session, msg)
+        session.env.step(action)
+
+        while session.env.agents:
+            a = session.env.agent_selection
+            if session.env.terminations.get(a) or session.env.truncations.get(a):
+                session.env.step(None)
+            else:
+                break
+
+
+async def _broadcast_system_chat(session, text: str) -> None:
+    payload = {"type": "chat", "from": "system", "text": text[:240]}
+    for ws in list(session.players.values()) + list(session.spectators):
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            pass
 
 
 if FRONTEND_DIST.exists():

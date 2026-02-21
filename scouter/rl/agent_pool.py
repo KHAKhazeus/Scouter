@@ -13,12 +13,15 @@ import torch
 from ray.rllib.algorithms.algorithm import Algorithm
 from ray.rllib.core.columns import Columns
 
+from scouter.rl.rllib_wrapper import register_scout_env
+
 
 @dataclass
 class LoadedAgent:
     agent_id: str
     checkpoint_path: Path
     algo: Algorithm
+    device: torch.device
 
 
 class AgentPool:
@@ -65,8 +68,19 @@ class AgentPool:
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint path does not exist: {checkpoint_path}")
 
-        algo = Algorithm.from_checkpoint(str(checkpoint_path))
-        loaded = LoadedAgent(agent_id=agent_id, checkpoint_path=checkpoint_path, algo=algo)
+        # Checkpoints reference scout_v0; ensure env is registered in serve process.
+        register_scout_env("scout_v0")
+        algo = Algorithm.from_checkpoint(checkpoint_path.resolve().as_uri())
+        module = algo.get_module("shared_policy")
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        module.to(device)
+        module.eval()
+        loaded = LoadedAgent(
+            agent_id=agent_id,
+            checkpoint_path=checkpoint_path,
+            algo=algo,
+            device=device,
+        )
         self._loaded[agent_id] = loaded
         return loaded
 
@@ -76,25 +90,47 @@ class AgentPool:
         agent_id: str,
         obs: dict[str, np.ndarray],
         policy_id: str = "shared_policy",
-    ) -> int:
+        return_info: bool = False,
+    ) -> int | tuple[int, dict[str, Any]]:
         loaded = self.load(agent_id)
         module = loaded.algo.get_module(policy_id)
 
         obs_batch = {
-            "observations": torch.from_numpy(obs["observations"][None, :]).float(),
-            "action_mask": torch.from_numpy(obs["action_mask"][None, :]).float(),
+            "observations": torch.from_numpy(obs["observations"][None, :]).float().to(loaded.device),
+            "action_mask": torch.from_numpy(obs["action_mask"][None, :]).float().to(loaded.device),
         }
         with torch.no_grad():
             out = module.forward_inference({Columns.OBS: obs_batch})
         logits = out[Columns.ACTION_DIST_INPUTS]
-        action_idx = int(torch.argmax(logits[0]).item())
+        raw_argmax_action = int(torch.argmax(logits[0]).item())
+        action_idx = raw_argmax_action
 
         if action_idx < 0 or action_idx >= len(obs["action_mask"]):
             valid = np.where(obs["action_mask"] > 0)[0]
-            return int(valid[0]) if len(valid) else 0
+            chosen = int(valid[0]) if len(valid) else 0
+            if return_info:
+                return chosen, {
+                    "source": "model_corrected_out_of_range",
+                    "raw_argmax_action": raw_argmax_action,
+                    "device": str(loaded.device),
+                }
+            return chosen
         if obs["action_mask"][action_idx] <= 0:
             valid = np.where(obs["action_mask"] > 0)[0]
-            return int(valid[0]) if len(valid) else 0
+            chosen = int(valid[0]) if len(valid) else 0
+            if return_info:
+                return chosen, {
+                    "source": "model_corrected_masked",
+                    "raw_argmax_action": raw_argmax_action,
+                    "device": str(loaded.device),
+                }
+            return chosen
+        if return_info:
+            return action_idx, {
+                "source": "model",
+                "raw_argmax_action": raw_argmax_action,
+                "device": str(loaded.device),
+            }
         return action_idx
 
     def close(self) -> None:

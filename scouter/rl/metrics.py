@@ -14,6 +14,14 @@ TRAIN_STABILITY_KEYS = (
     "vf_explained_var",
     "vf_loss",
     "total_loss",
+    "mean_kl_loss",
+    "curr_entropy_coeff",
+    "vf_loss_unclipped",
+    "default_optimizer_learning_rate",
+    "diff_num_grad_updates_vs_sampler_policy",
+    "module_train_batch_size_mean",
+    "num_module_steps_trained_lifetime_throughput",
+    "gradients_default_optimizer_global_norm",
 )
 
 
@@ -30,7 +38,12 @@ def _as_float(val: Any) -> float | None:
         return None
 
 
-def extract_train_metrics(result: dict[str, Any], iteration: int) -> dict[str, Any]:
+def extract_train_metrics(
+    result: dict[str, Any],
+    iteration: int,
+    *,
+    target_kl: float | None = None,
+) -> dict[str, Any]:
     """Extract a stable subset of useful training metrics from RLlib result dict."""
     env_runners = result.get("env_runners", {})
     learners = result.get("learners", {})
@@ -47,6 +60,14 @@ def extract_train_metrics(result: dict[str, Any], iteration: int) -> dict[str, A
             k: _as_float(v)
             for k, v in env_runners.get("agent_episode_returns_mean", {}).items()
         },
+        "throughput": {
+            "sample_env_steps_per_s": _as_float(
+                env_runners.get("num_env_steps_sampled_lifetime_throughput")
+            ),
+            "train_module_steps_per_s": _as_float(
+                policy_stats.get("num_module_steps_trained_lifetime_throughput")
+            ),
+        },
     }
 
     stability = {}
@@ -54,6 +75,23 @@ def extract_train_metrics(result: dict[str, Any], iteration: int) -> dict[str, A
         if key in policy_stats:
             stability[key] = _as_float(policy_stats.get(key))
     record["stability"] = stability
+
+    p0 = record["per_agent_returns"].get("player_0")
+    p1 = record["per_agent_returns"].get("player_1")
+    seat_return_gap = None
+    if p0 is not None and p1 is not None:
+        seat_return_gap = p0 - p1
+
+    mean_kl = stability.get("mean_kl_loss")
+    clip_proxy = None
+    if mean_kl is not None and target_kl and target_kl > 0:
+        # Proxy only: high values usually correlate with entering PPO clipped regime.
+        clip_proxy = max(0.0, mean_kl / target_kl)
+
+    record["derived"] = {
+        "seat_return_gap": seat_return_gap,
+        "clip_activity_proxy": clip_proxy,
+    }
     return record
 
 

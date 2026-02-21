@@ -97,11 +97,5 @@ export function useGameSocket(gameId, requestedSeat) {
     }
   }, [])
 
-  const sendFlipHand = useCallback(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'flip_hand' }))
-    }
-  }, [])
-
-  return { state, connected, seat, sendAction, sendFlipHand, sendChat, messages, error }
+  return { state, connected, seat, sendAction, sendChat, messages, error }
 }
