@@ -38,8 +38,12 @@ def _load_jsonl(path: Path, limit: int | None = None) -> list[dict[str, Any]]:
 
 
 def _run_dir(run_id: str) -> Path:
-    path = _runs_root() / run_id
-    if not path.exists():
+    root = _runs_root().resolve()
+    path = (root / run_id).resolve()
+    # Prevent path traversal outside the configured runs root.
+    if root not in path.parents and path != root:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+    if not path.exists() or not path.is_dir():
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
     return path
 
@@ -51,13 +55,19 @@ def list_runs() -> dict[str, Any]:
         return {"runs": []}
 
     runs = []
-    for run_dir in sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name, reverse=True):
+    candidates = sorted(
+        [p.parent for p in root.rglob("manifest.json") if p.is_file()],
+        key=lambda p: p.as_posix(),
+        reverse=True,
+    )
+    for run_dir in candidates:
         manifest = _load_json(run_dir / "manifest.json", default={})
         if not manifest:
             continue
+        rel_run_id = run_dir.relative_to(root).as_posix()
         runs.append(
             {
-                "run_id": run_dir.name,
+                "run_id": rel_run_id,
                 "created_at": manifest.get("created_at"),
                 "latest_iteration": manifest.get("latest_iteration", 0),
                 "latest_eval_iteration": manifest.get("latest_eval_iteration"),
@@ -69,7 +79,7 @@ def list_runs() -> dict[str, Any]:
     return {"runs": runs}
 
 
-@router.get("/runs/{run_id}/summary")
+@router.get("/runs/{run_id:path}/summary")
 def run_summary(run_id: str) -> dict[str, Any]:
     run_dir = _run_dir(run_id)
     manifest = _load_json(run_dir / "manifest.json", default={})
@@ -92,21 +102,21 @@ def run_summary(run_id: str) -> dict[str, Any]:
     }
 
 
-@router.get("/runs/{run_id}/train")
+@router.get("/runs/{run_id:path}/train")
 def run_train(run_id: str, limit: int = 1000) -> dict[str, Any]:
     run_dir = _run_dir(run_id)
     limit = max(1, min(limit, 100000))
     return {"run_id": run_id, "rows": _load_jsonl(run_dir / "train_metrics.jsonl", limit=limit)}
 
 
-@router.get("/runs/{run_id}/evolution")
+@router.get("/runs/{run_id:path}/evolution")
 def run_evolution(run_id: str, limit: int = 1000) -> dict[str, Any]:
     run_dir = _run_dir(run_id)
     limit = max(1, min(limit, 100000))
     return {"run_id": run_id, "rows": _load_jsonl(run_dir / "eval_metrics.jsonl", limit=limit)}
 
 
-@router.get("/runs/{run_id}/snapshots")
+@router.get("/runs/{run_id:path}/snapshots")
 def run_snapshots(run_id: str) -> dict[str, Any]:
     run_dir = _run_dir(run_id)
     manifest = _load_json(run_dir / "manifest.json", default={})
@@ -118,7 +128,7 @@ def run_snapshots(run_id: str) -> dict[str, Any]:
     }
 
 
-@router.get("/runs/{run_id}/eval-games")
+@router.get("/runs/{run_id:path}/eval-games")
 def run_eval_games(
     run_id: str,
     limit: int = 2000,
@@ -141,7 +151,7 @@ def run_eval_games(
     return {"run_id": run_id, "rows": rows}
 
 
-@router.get("/runs/{run_id}/eval-games/{game_id}")
+@router.get("/runs/{run_id:path}/eval-games/{game_id}")
 def run_eval_game_replay(run_id: str, game_id: str) -> dict[str, Any]:
     run_dir = _run_dir(run_id)
     rows = _load_jsonl(run_dir / "eval_games.jsonl", limit=None)
@@ -165,7 +175,7 @@ def run_eval_game_replay(run_id: str, game_id: str) -> dict[str, Any]:
     }
 
 
-@router.get("/runs/{run_id}/status")
+@router.get("/runs/{run_id:path}/status")
 def run_status(run_id: str) -> dict[str, Any]:
     run_dir = _run_dir(run_id)
     manifest = _load_json(run_dir / "manifest.json", default={})
@@ -181,7 +191,7 @@ def run_status(run_id: str) -> dict[str, Any]:
     }
 
 
-@router.get("/runs/{run_id}/events")
+@router.get("/runs/{run_id:path}/events")
 def run_events(run_id: str, limit: int = 500) -> dict[str, Any]:
     run_dir = _run_dir(run_id)
     limit = max(1, min(limit, 200000))

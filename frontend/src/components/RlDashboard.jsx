@@ -17,6 +17,11 @@ function apiUrl(path) {
   return `${window.location.origin}${path}`
 }
 
+function runApiPath(runId, suffix) {
+  const encoded = encodeURIComponent(runId)
+  return `/rl/runs/${encoded}${suffix}`
+}
+
 function fmt(value, digits = 3) {
   if (value === null || value === undefined) return 'n/a'
   const num = Number(value)
@@ -269,13 +274,13 @@ export default function RlDashboard() {
       setError(null)
       try {
         const [s, t, e, g, snap, st, ev] = await Promise.all([
-          fetch(apiUrl(`/rl/runs/${runId}/summary`)).then(r => r.json()),
-          fetch(apiUrl(`/rl/runs/${runId}/train?limit=5000`)).then(r => r.json()),
-          fetch(apiUrl(`/rl/runs/${runId}/evolution?limit=5000`)).then(r => r.json()),
-          fetch(apiUrl(`/rl/runs/${runId}/eval-games?limit=5000`)).then(r => r.json()),
-          fetch(apiUrl(`/rl/runs/${runId}/snapshots`)).then(r => r.json()),
-          fetch(apiUrl(`/rl/runs/${runId}/status`)).then(r => r.json()),
-          fetch(apiUrl(`/rl/runs/${runId}/events?limit=500`)).then(r => r.json()),
+          fetch(apiUrl(runApiPath(runId, '/summary'))).then(r => r.json()),
+          fetch(apiUrl(runApiPath(runId, '/train?limit=5000'))).then(r => r.json()),
+          fetch(apiUrl(runApiPath(runId, '/evolution?limit=5000'))).then(r => r.json()),
+          fetch(apiUrl(runApiPath(runId, '/eval-games?limit=5000'))).then(r => r.json()),
+          fetch(apiUrl(runApiPath(runId, '/snapshots'))).then(r => r.json()),
+          fetch(apiUrl(runApiPath(runId, '/status'))).then(r => r.json()),
+          fetch(apiUrl(runApiPath(runId, '/events?limit=500'))).then(r => r.json()),
         ])
 
         if (cancelled) return
@@ -305,7 +310,9 @@ export default function RlDashboard() {
     let cancelled = false
     async function loadReplay() {
       try {
-        const res = await fetch(apiUrl(`/rl/runs/${runId}/eval-games/${selectedGameId}`))
+        const runPath = encodeURIComponent(runId)
+        const gamePath = encodeURIComponent(selectedGameId)
+        const res = await fetch(apiUrl(`/rl/runs/${runPath}/eval-games/${gamePath}`))
         const data = await res.json()
         if (!res.ok) {
           throw new Error(data?.detail || `HTTP ${res.status}`)

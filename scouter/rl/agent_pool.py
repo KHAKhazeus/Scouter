@@ -84,6 +84,18 @@ class AgentPool:
         self._loaded[agent_id] = loaded
         return loaded
 
+    def preload(self, agent_id: str) -> dict[str, Any]:
+        """Explicitly load an agent and return serve metadata."""
+        already_loaded = agent_id in self._loaded
+        loaded = self.load(agent_id)
+        return {
+            "agent_id": loaded.agent_id,
+            "loaded": True,
+            "already_loaded": already_loaded,
+            "device": str(loaded.device),
+            "checkpoint_path": str(loaded.checkpoint_path),
+        }
+
     def compute_action(
         self,
         *,

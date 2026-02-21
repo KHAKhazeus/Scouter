@@ -102,3 +102,64 @@ def test_run_dir_raises_when_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("RL_RUNS_ROOT", str(tmp_path / "missing"))
     with pytest.raises(HTTPException):
         rl_monitor.run_summary("not_exist")
+
+
+def test_rl_monitor_nested_run_discovery_and_readers(tmp_path, monkeypatch):
+    runs_root = tmp_path / "rl_runs"
+    run = runs_root / "overnight_sweep_abc123" / "A0_baseline_stable"
+    run.mkdir(parents=True)
+
+    _write_json(
+        run / "manifest.json",
+        {
+            "run_id": "A0_baseline_stable",
+            "created_at": "2026-02-21T00:00:00Z",
+            "latest_iteration": 25,
+            "latest_eval_iteration": 20,
+            "snapshots": [{"snapshot_id": "iter_25", "path": "/tmp/snap25"}],
+            "training_state": {"phase": "training"},
+            "timeouts": {"total_eval_timeouts": 0, "consecutive_eval_timeouts": 0},
+        },
+    )
+    _write_json(run / "leaderboard.json", {"latest_eval": {"win_rate_vs_random": 0.8}})
+    _write_jsonl(run / "train_metrics.jsonl", [{"iteration": 25, "episode_return_mean": 0.0}])
+    _write_jsonl(
+        run / "eval_metrics.jsonl",
+        [{"iteration": 20, "opponent_type": "random", "win_rate": 0.8}],
+    )
+
+    nested_id = "overnight_sweep_abc123/A0_baseline_stable"
+    monkeypatch.setenv("RL_RUNS_ROOT", str(runs_root))
+
+    runs = rl_monitor.list_runs()
+    run_ids = {r["run_id"] for r in runs["runs"]}
+    assert nested_id in run_ids
+
+    summary = rl_monitor.run_summary(nested_id)
+    assert summary["run_id"] == nested_id
+    assert summary["latest_eval_summary"]["win_rate_vs_random"] == 0.8
+
+    train = rl_monitor.run_train(nested_id, limit=100)
+    assert train["rows"][0]["iteration"] == 25
+
+    evo = rl_monitor.run_evolution(nested_id, limit=100)
+    assert evo["rows"][0]["opponent_type"] == "random"
+
+    snaps = rl_monitor.run_snapshots(nested_id)
+    assert snaps["snapshots"][0]["snapshot_id"] == "iter_25"
+
+    status = rl_monitor.run_status(nested_id)
+    assert status["latest_iteration"] == 25
+
+    events = rl_monitor.run_events(nested_id, limit=100)
+    assert events["rows"] == []
+
+
+def test_run_dir_rejects_path_traversal(tmp_path, monkeypatch):
+    runs_root = tmp_path / "rl_runs"
+    run = runs_root / "run_ok"
+    run.mkdir(parents=True)
+    _write_json(run / "manifest.json", {"run_id": "run_ok"})
+    monkeypatch.setenv("RL_RUNS_ROOT", str(runs_root))
+    with pytest.raises(HTTPException):
+        rl_monitor.run_summary("../outside")

@@ -12,6 +12,10 @@ export default function LobbyScreen({ onJoined }) {
   const [agents, setAgents] = useState([])
   const [agentId, setAgentId] = useState('')
   const [agentSeat, setAgentSeat] = useState('player_0')
+  const [agentLoadStatus, setAgentLoadStatus] = useState('idle') // idle | loading | loaded | error
+  const [agentLoadMessage, setAgentLoadMessage] = useState('')
+  const [agentLoadMeta, setAgentLoadMeta] = useState(null)
+  const [loadedAgentId, setLoadedAgentId] = useState('')
 
   useEffect(() => {
     let cancelled = false
@@ -32,6 +36,13 @@ export default function LobbyScreen({ onJoined }) {
     return () => {
       cancelled = true
     }
+  }, [agentId])
+
+  useEffect(() => {
+    setAgentLoadStatus('idle')
+    setAgentLoadMessage('')
+    setAgentLoadMeta(null)
+    setLoadedAgentId('')
   }, [agentId])
 
   async function handleCreate() {
@@ -63,6 +74,10 @@ export default function LobbyScreen({ onJoined }) {
       setError('No deployed agent selected')
       return
     }
+    if (agentLoadStatus !== 'loaded' || loadedAgentId !== agentId) {
+      setError('Load agent first before starting.')
+      return
+    }
     setLoading(true)
     setError('')
     try {
@@ -86,6 +101,42 @@ export default function LobbyScreen({ onJoined }) {
       setError(e.message)
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function handleLoadAgent() {
+    if (!agentId) {
+      setError('No deployed agent selected')
+      return
+    }
+    setError('')
+    setAgentLoadStatus('loading')
+    setAgentLoadMessage('')
+    setAgentLoadMeta(null)
+    try {
+      const res = await fetch('/agents/load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent_id: agentId })
+      })
+      if (!res.ok) {
+        const body = await res.text()
+        throw new Error(body || `Failed to load agent ${agentId}`)
+      }
+      const data = await res.json()
+      const device = data.device || 'unknown'
+      const seconds = typeof data.load_seconds === 'number' ? data.load_seconds.toFixed(2) : null
+      const prefix = data.already_loaded ? 'Agent already loaded' : 'Agent loaded successfully'
+      const timing = seconds ? ` (${seconds}s)` : ''
+      setAgentLoadStatus('loaded')
+      setLoadedAgentId(agentId)
+      setAgentLoadMeta(data)
+      setAgentLoadMessage(`${prefix} on ${device}${timing}.`)
+    } catch (e) {
+      setAgentLoadStatus('error')
+      setLoadedAgentId('')
+      setAgentLoadMeta(null)
+      setAgentLoadMessage(e.message || 'Failed to load agent.')
     }
   }
 
@@ -132,9 +183,33 @@ export default function LobbyScreen({ onJoined }) {
               ))}
             </div>
             <button
+              className="btn btn-secondary btn-full"
+              onClick={handleLoadAgent}
+              disabled={loading || !agentId || agentLoadStatus === 'loading'}
+              style={{ marginBottom: 8 }}
+            >
+              {agentLoadStatus === 'loading' ? 'Loading Agent…' : 'Load Agent'}
+            </button>
+            {agentLoadStatus === 'loaded' && (
+              <p className="success-msg" style={{ marginBottom: 8 }}>
+                {agentLoadMessage}
+                {agentLoadMeta?.checkpoint_path ? ` Checkpoint: ${agentLoadMeta.checkpoint_path}` : ''}
+              </p>
+            )}
+            {agentLoadStatus === 'error' && (
+              <p className="error-msg" style={{ marginBottom: 8 }}>
+                {agentLoadMessage}
+              </p>
+            )}
+            <button
               className="btn btn-primary btn-full"
               onClick={handlePlayAgent}
-              disabled={loading || !agentId}
+              disabled={
+                loading ||
+                !agentId ||
+                agentLoadStatus !== 'loaded' ||
+                loadedAgentId !== agentId
+              }
             >
               {loading ? 'Starting…' : 'Start Vs Agent (2 Rounds)'}
             </button>

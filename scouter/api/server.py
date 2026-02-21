@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -49,6 +50,34 @@ async def create_game() -> dict:
 @app.get("/agents/deployed")
 async def list_deployed_agents() -> dict:
     return {"agents": agent_pool.list_deployed()}
+
+
+@app.post("/agents/load")
+async def load_agent(payload: dict) -> dict:
+    agent_id = str(payload.get("agent_id", "")).strip()
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id is required")
+
+    available = {a["agent_id"] for a in agent_pool.list_deployed()}
+    if agent_id not in available:
+        raise HTTPException(status_code=404, detail=f"Unknown agent_id: {agent_id}")
+
+    started = time.monotonic()
+    try:
+        info = agent_pool.preload(agent_id)
+    except Exception as exc:
+        logger.exception("[agent-load] failed agent_id=%s error=%r", agent_id, exc)
+        raise HTTPException(status_code=500, detail=f"Failed to load agent {agent_id}") from exc
+
+    elapsed = time.monotonic() - started
+    logger.info(
+        "[agent-load] ok agent_id=%s already_loaded=%s device=%s load_seconds=%.3f",
+        info["agent_id"],
+        info["already_loaded"],
+        info["device"],
+        elapsed,
+    )
+    return {"ok": True, "load_seconds": elapsed, **info}
 
 
 @app.post("/agent-game")
